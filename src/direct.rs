@@ -116,35 +116,30 @@ impl DirectNet {
         }
     }
 
-    pub fn send_message(&self, session_id: u64, message: &[u8]) {
+    pub async fn send_message(&self, session_id: u64, message: &[u8]) {
         let message = message.to_owned();
-        let session_mailbox = self.session_mailbox.clone();
-        tokio::spawn(async move {
-            if let Some(tx) = session_mailbox.read().await.get(&session_id) {
-                tx.send(message).unwrap();
-            } else {
-                warn!("session#{} lost.", session_id);
-            }
-        });
+        let session_mailbox = self.session_mailbox.read().await;
+        if let Some(tx) = session_mailbox.get(&session_id) {
+            tx.send(message).unwrap();
+        } else {
+            warn!("session#{} lost.", session_id);
+        }
     }
 
-    pub fn broadcast_message(self, message: &[u8]) {
-        self.addr_by_id.values().for_each(|&addr| {
-            let this = self.clone();
+    pub async fn broadcast_message(self, message: &[u8]) {
+        for addr in self.addr_by_id.values() {
             let message = message.to_owned();
-            tokio::spawn(async move {
-                let session_id = loop {
-                    if let Ok(stream) = TcpStream::connect(addr).await {
-                        let uid = this.uid.fetch_add(1, Ordering::SeqCst);
-                        this.clone().serve(uid, stream).await;
-                        break uid;
-                    }
-                    let d = Duration::from_millis(100);
-                    let mut delay = interval(d);
-                    delay.tick().await;
-                };
-                this.send_message(session_id, message.as_slice());
-            });
-        });
+            let session_id = loop {
+                if let Ok(stream) = TcpStream::connect(addr).await {
+                    let uid = self.uid.fetch_add(1, Ordering::SeqCst);
+                    self.clone().serve(uid, stream).await;
+                    break uid;
+                }
+                let d = Duration::from_millis(100);
+                let mut delay = interval(d);
+                delay.tick().await;
+            };
+            self.send_message(session_id, message.as_slice()).await;
+        }
     }
 }

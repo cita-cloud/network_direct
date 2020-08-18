@@ -144,7 +144,7 @@ impl NetworkService for NetworkServer {
         let msg = request.into_inner();
         let mut buf: Vec<u8> = Vec::new();
         if msg.encode(&mut buf).is_ok() {
-            self.direct.send_message(msg.origin, buf.as_slice());
+            self.direct.send_message(msg.origin, buf.as_slice()).await;
             let reply = SimpleResponse { is_success: true };
             Ok(Response::new(reply))
         } else {
@@ -161,7 +161,7 @@ impl NetworkService for NetworkServer {
         let msg = request.into_inner();
         let mut buf: Vec<u8> = Vec::new();
         if msg.encode(&mut buf).is_ok() {
-            self.direct.clone().broadcast_message(buf.as_slice());
+            self.direct.clone().broadcast_message(buf.as_slice()).await;
             let reply = SimpleResponse { is_success: true };
             Ok(Response::new(reply))
         } else {
