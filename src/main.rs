@@ -77,9 +77,12 @@ use prost::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::RwLock;
+use tokio::time::interval;
 
 use cita_cloud_proto::common::Empty;
 use cita_cloud_proto::common::SimpleResponse;
@@ -89,6 +92,8 @@ use cita_cloud_proto::network::{
     NetworkMsg, NetworkStatusResponse, RegisterInfo,
 };
 use tonic::{transport::Server, Request, Response, Status};
+
+use direct::NetEvent;
 
 async fn run(opts: RunOpts) {
     let path = "network-config.toml";
@@ -107,27 +112,43 @@ async fn run(opts: RunOpts) {
         .collect();
 
     let (network_tx, network_rx) = unbounded_channel();
-    let direct_net = DirectNet::new(peers, network_tx);
-    direct_net.clone().start(listen_addr);
+    let mut direct_net = DirectNet::new(listen_addr, network_tx);
+    let net_event_sender = direct_net.sender();
     let dispatch_table = Arc::new(RwLock::new(HashMap::new()));
+
+    tokio::spawn(keep_connection(peers, net_event_sender.clone()));
     tokio::spawn(run_network(network_rx, dispatch_table.clone()));
-    run_grpc_server(opts.grpc_port, direct_net, dispatch_table)
-        .await
-        .unwrap();
+    tokio::spawn(run_grpc_server(
+        opts.grpc_port,
+        net_event_sender,
+        dispatch_table,
+    ));
+    direct_net.run().await;
+}
+
+async fn keep_connection(peers: Vec<SocketAddr>, mut net_event_sender: mpsc::Sender<NetEvent>) {
+    let mut recheck_interval = interval(Duration::from_secs(15));
+    loop {
+        for &addr in peers.iter() {
+            let event = NetEvent::OutboundConnection { addr };
+            net_event_sender.send(event).await.unwrap();
+        }
+        recheck_interval.tick().await;
+    }
 }
 
 struct NetworkServer {
-    direct: DirectNet,
+    net_event_sender: mpsc::Sender<NetEvent>,
     dispatch_table: Arc<RwLock<HashMap<String, (String, String)>>>,
 }
 
 impl NetworkServer {
     fn new(
-        direct: DirectNet,
+        net_event_sender: mpsc::Sender<NetEvent>,
         dispatch_table: Arc<RwLock<HashMap<String, (String, String)>>>,
     ) -> Self {
         Self {
-            direct,
+            net_event_sender,
             dispatch_table,
         }
     }
@@ -144,7 +165,13 @@ impl NetworkService for NetworkServer {
         let msg = request.into_inner();
         let mut buf: Vec<u8> = Vec::new();
         if msg.encode(&mut buf).is_ok() {
-            self.direct.send_message(msg.origin, buf.as_slice()).await;
+            let event = NetEvent::SendMessage {
+                session_id: msg.origin,
+                data: buf,
+            };
+            if let Err(e) = self.net_event_sender.clone().send(event).await {
+                warn!("NetworkServer send failed: `{}`", e);
+            }
             let reply = SimpleResponse { is_success: true };
             Ok(Response::new(reply))
         } else {
@@ -161,7 +188,10 @@ impl NetworkService for NetworkServer {
         let msg = request.into_inner();
         let mut buf: Vec<u8> = Vec::new();
         if msg.encode(&mut buf).is_ok() {
-            self.direct.clone().broadcast_message(buf.as_slice()).await;
+            let event = NetEvent::BroadcastMessage { msg: buf };
+            if let Err(e) = self.net_event_sender.clone().send(event).await {
+                warn!("NetworkServer broadcast failed: `{}`", e);
+            }
             let reply = SimpleResponse { is_success: true };
             Ok(Response::new(reply))
         } else {
@@ -200,12 +230,12 @@ impl NetworkService for NetworkServer {
 
 async fn run_grpc_server(
     port: String,
-    direct: DirectNet,
+    net_event_sender: mpsc::Sender<NetEvent>,
     dispatch_table: Arc<RwLock<HashMap<String, (String, String)>>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     let addr_str = format!("127.0.0.1:{}", port);
     let addr = addr_str.parse()?;
-    let network_server = NetworkServer::new(direct, dispatch_table);
+    let network_server = NetworkServer::new(net_event_sender, dispatch_table);
 
     Server::builder()
         .add_service(NetworkServiceServer::new(network_server))

@@ -1,6 +1,6 @@
 [package]
 name = "network"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["whfuyn <whfuyn@outlook.com>"]
 edition = "2018"
 
@@ -16,5 +16,6 @@ serde = "*"
 serde_derive = "*"
 tonic = "0.2"
 prost = "0.6"
-tokio = { version = "0.2", features = ["macros"] }
+futures = "0.3.0"
+tokio = { version = "0.2", features = ["macros", "time"] }
 cita_cloud_proto = { git = "https://github.com/cita-cloud/cita_cloud_proto" }
