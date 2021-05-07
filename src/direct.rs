@@ -10,11 +10,13 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::tcp::OwnedWriteHalf;
-use tokio::stream::StreamExt;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::interval;
+
+use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::StreamExt;
 
 use futures::channel::oneshot;
 #[allow(unused)]
@@ -78,11 +80,7 @@ impl Session {
         }
     }
 
-    async fn serve_inflow(
-        session_id: u64,
-        mut tcp_rx: OwnedReadHalf,
-        mut net_tx: Sender<NetEvent>,
-    ) {
+    async fn serve_inflow(session_id: u64, mut tcp_rx: OwnedReadHalf, net_tx: Sender<NetEvent>) {
         while let Ok(len) = tcp_rx.read_u64().await {
             let mut buf = vec![0; len as usize];
             match tcp_rx.read_exact(&mut buf).await {
@@ -168,8 +166,8 @@ impl DirectNet {
     }
 
     pub async fn listen(&self, addr: SocketAddr) -> Result<()> {
-        let mut listener = TcpListener::bind(addr).await?;
-        let mut event_sender = self.net_event_sender.clone();
+        let mut listener = TcpListenerStream::new(TcpListener::bind(addr).await?);
+        let event_sender = self.net_event_sender.clone();
         tokio::spawn(async move {
             while let Some(conn) = listener.next().await {
                 match conn {
@@ -227,7 +225,7 @@ impl DirectNet {
     fn handle_net_event(&mut self, event: NetEvent) {
         match event {
             NetEvent::InboundConnection { mut conn } => {
-                let mut event_sender = self.net_event_sender.clone();
+                let event_sender = self.net_event_sender.clone();
                 tokio::spawn(async move {
                     match conn.read_u64().await {
                         Ok(len) if (len as usize) < MAX_ADDR_LEN => {
@@ -260,31 +258,22 @@ impl DirectNet {
                 });
             }
             NetEvent::OutboundConnection { addr } => {
-                if self
-                    .sessions
-                    .values()
-                    .find(|&sess| sess.peer_addr == addr)
-                    .is_none()
-                {
-                    let mut event_sender = self.net_event_sender.clone();
-                    let listen_addr = self.listen_addr;
-                    tokio::spawn(async move {
-                        let mut conn = connect_with_retry(addr).await;
-                        let addr_bytes = listen_addr.to_string().as_bytes().to_owned();
-                        let payload =
-                            [&(addr_bytes.len() as u64).to_be_bytes(), &addr_bytes[..]].concat();
-                        conn.write_all(payload.as_slice()).await.unwrap();
-                        event_sender
-                            .send(NetEvent::SessionOpen {
-                                peer_addr: addr,
-                                conn,
-                            })
-                            .await
-                            .unwrap();
-                    });
-                } else {
-                    warn!("repeated connection to: `{}`", addr);
-                }
+                let event_sender = self.net_event_sender.clone();
+                let listen_addr = self.listen_addr;
+                tokio::spawn(async move {
+                    let mut conn = connect_with_retry(addr).await;
+                    let addr_bytes = listen_addr.to_string().as_bytes().to_owned();
+                    let payload =
+                        [&(addr_bytes.len() as u64).to_be_bytes(), &addr_bytes[..]].concat();
+                    conn.write_all(payload.as_slice()).await.unwrap();
+                    event_sender
+                        .send(NetEvent::SessionOpen {
+                            peer_addr: addr,
+                            conn,
+                        })
+                        .await
+                        .unwrap();
+                });
             }
             NetEvent::MessageReceived { session_id, data } => {
                 self.outbound_sender.send((session_id, data)).unwrap();
@@ -304,10 +293,19 @@ impl DirectNet {
                 }
             }
             NetEvent::SessionOpen { peer_addr, conn } => {
-                let session_id = self.next_session();
-                let session =
-                    Session::new(session_id, peer_addr, conn, self.net_event_sender.clone());
-                self.sessions.insert(session_id, session);
+                if self
+                    .sessions
+                    .values()
+                    .find(|&sess| sess.peer_addr == peer_addr)
+                    .is_none()
+                {
+                    let session_id = self.next_session();
+                    let session =
+                        Session::new(session_id, peer_addr, conn, self.net_event_sender.clone());
+                    self.sessions.insert(session_id, session);
+                } else {
+                    warn!("repeated connection to: `{}`", peer_addr);
+                }
             }
             // CloseNet event would have been handled outside.
             NetEvent::CloseNet => unreachable!(),
@@ -318,9 +316,9 @@ impl DirectNet {
 async fn connect_with_retry(addr: SocketAddr) -> TcpStream {
     let mut retry_interval = interval(Duration::from_millis(500));
     loop {
+        retry_interval.tick().await;
         if let Ok(stream) = TcpStream::connect(addr).await {
             return stream;
         }
-        retry_interval.tick().await;
     }
 }

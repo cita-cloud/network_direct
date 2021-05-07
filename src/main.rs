@@ -65,7 +65,7 @@ fn main() {
             // init log4rs
             log4rs::init_file("network-log4rs.yaml", Default::default()).unwrap();
             info!("grpc port of this service: {}", opts.grpc_port);
-            let mut rt = tokio::runtime::Runtime::new().unwrap();
+            let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(run(opts));
         }
     }
@@ -126,7 +126,7 @@ async fn run(opts: RunOpts) {
     direct_net.run().await;
 }
 
-async fn keep_connection(peers: Vec<SocketAddr>, mut net_event_sender: mpsc::Sender<NetEvent>) {
+async fn keep_connection(peers: Vec<SocketAddr>, net_event_sender: mpsc::Sender<NetEvent>) {
     let mut recheck_interval = interval(Duration::from_secs(15));
     loop {
         for &addr in peers.iter() {
@@ -205,7 +205,7 @@ impl NetworkService for NetworkServer {
     ) -> Result<Response<NetworkStatusResponse>, Status> {
         debug!("register_endpoint request: {:?}", request);
 
-        let reply = NetworkStatusResponse { peer_count: 4 };
+        let reply = NetworkStatusResponse { peer_count: 5 };
         Ok(Response::new(reply))
     }
 
@@ -251,7 +251,10 @@ async fn dispatch_network_msg(
     port: String,
     msg: NetworkMsg,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = client_map.read().await.get(&port).cloned();
+    let mut client = {
+        let map = client_map.read().await;
+        map.get(&port).cloned()
+    };
 
     if client.is_none() {
         let dest_addr = format!("http://127.0.0.1:{}", port);
@@ -292,8 +295,10 @@ async fn run_network(
                         };
                         if let Some(port) = port {
                             if let Err(e) = dispatch_network_msg(client_map, port, msg).await {
-                                debug!("dispatch error: {:?}", e);
+                                warn!("dispatch error: {:?}", e);
                             }
+                        } else {
+                            warn!("dipatch port not found");
                         }
                     });
                 }
