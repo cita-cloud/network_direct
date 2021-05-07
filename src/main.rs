@@ -49,6 +49,11 @@ struct RunOpts {
     /// Sets grpc port of this service.
     #[clap(short = 'p', long = "port", default_value = "50000")]
     grpc_port: String,
+    /// Sets path of network key file.
+    /// It's not used for network_direct. Leave it here for compatibility.
+    #[allow(unused)]
+    #[clap(short = 'k', long = "key_file", default_value = "network-key")]
+    key_file: String,
 }
 
 fn main() {
