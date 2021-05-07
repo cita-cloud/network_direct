@@ -121,10 +121,12 @@ async fn run(opts: RunOpts) {
     let net_event_sender = direct_net.sender();
     let dispatch_table = Arc::new(RwLock::new(HashMap::new()));
 
+    let peer_count = peers.len() as u64;
     tokio::spawn(keep_connection(peers, net_event_sender.clone()));
     tokio::spawn(run_network(network_rx, dispatch_table.clone()));
     tokio::spawn(run_grpc_server(
         opts.grpc_port,
+        peer_count,
         net_event_sender,
         dispatch_table,
     ));
@@ -143,16 +145,19 @@ async fn keep_connection(peers: Vec<SocketAddr>, net_event_sender: mpsc::Sender<
 }
 
 struct NetworkServer {
+    peer_count: u64,
     net_event_sender: mpsc::Sender<NetEvent>,
     dispatch_table: Arc<RwLock<HashMap<String, (String, String)>>>,
 }
 
 impl NetworkServer {
     fn new(
+        peer_count: u64,
         net_event_sender: mpsc::Sender<NetEvent>,
         dispatch_table: Arc<RwLock<HashMap<String, (String, String)>>>,
     ) -> Self {
         Self {
+            peer_count,
             net_event_sender,
             dispatch_table,
         }
@@ -210,7 +215,9 @@ impl NetworkService for NetworkServer {
     ) -> Result<Response<NetworkStatusResponse>, Status> {
         debug!("register_endpoint request: {:?}", request);
 
-        let reply = NetworkStatusResponse { peer_count: 5 };
+        let reply = NetworkStatusResponse {
+            peer_count: self.peer_count,
+        };
         Ok(Response::new(reply))
     }
 
@@ -235,12 +242,13 @@ impl NetworkService for NetworkServer {
 
 async fn run_grpc_server(
     port: String,
+    peer_count: u64,
     net_event_sender: mpsc::Sender<NetEvent>,
     dispatch_table: Arc<RwLock<HashMap<String, (String, String)>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     let addr_str = format!("127.0.0.1:{}", port);
     let addr = addr_str.parse()?;
-    let network_server = NetworkServer::new(net_event_sender, dispatch_table);
+    let network_server = NetworkServer::new(peer_count, net_event_sender, dispatch_table);
 
     Server::builder()
         .add_service(NetworkServiceServer::new(network_server))
