@@ -24,8 +24,6 @@ use log::{debug, info, warn};
 use tokio::io::Result;
 use tokio::sync::mpsc;
 
-const MAX_ADDR_LEN: usize = 128;
-
 #[derive(Debug)]
 struct Session {
     session_id: u64,
@@ -87,18 +85,29 @@ impl Session {
     }
 
     async fn serve_inflow(session_id: u64, mut tcp_rx: OwnedReadHalf, net_tx: Sender<NetEvent>) {
-        while let Ok(len) = tcp_rx.read_u64().await {
-            let mut buf = vec![0; len as usize];
-            match tcp_rx.read_exact(&mut buf).await {
-                Ok(_) => {
-                    let event = NetEvent::MessageReceived {
-                        session_id,
-                        data: buf,
-                    };
-                    net_tx.send(event).await.unwrap();
+        loop {
+            match tcp_rx.read_u64().await {
+                Ok(len) => {
+                    let mut buf = vec![0; len as usize];
+                    match tcp_rx.read_exact(&mut buf).await {
+                        Ok(_) => {
+                            let event = NetEvent::MessageReceived {
+                                session_id,
+                                data: buf,
+                            };
+                            net_tx.send(event).await.unwrap();
+                        }
+                        Err(e) => {
+                            warn!("Session inflow read failed: `{}`", e);
+                        }
+                    }
                 }
                 Err(e) => {
-                    warn!("Session inflow read failed: `{}`", e);
+                    warn!(
+                        "read inflow prefix length failed, closing session, reason: `{}`",
+                        e
+                    );
+                    break;
                 }
             }
         }
@@ -276,7 +285,7 @@ impl DirectNet {
                 }
             }
             NetEvent::BroadcastMessage { msg } => {
-                for sess in self.sessions.values() {
+                for sess in self.sessions.values().filter(|s| s.peer_addr.is_some()) {
                     if let Err(e) = sess.sender().send(msg.clone()) {
                         warn!("Send msg failed: {}", e);
                     }
@@ -284,6 +293,12 @@ impl DirectNet {
             }
             NetEvent::SessionOpen { peer_addr, conn } => {
                 let session_id = self.next_session();
+
+                info!(
+                    "new session opened, peer_addr: `{:?}`, session_id: `{}`",
+                    peer_addr, session_id
+                );
+
                 let session =
                     Session::new(session_id, peer_addr, conn, self.net_event_sender.clone());
                 self.sessions.insert(session_id, session);
