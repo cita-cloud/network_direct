@@ -106,14 +106,10 @@ async fn run(opts: RunOpts) {
         .unwrap_or_else(|err| panic!("Error while loading config: [{}]", err));
     let config = NetConfig::new(&buffer);
     let listen_addr: SocketAddr = format!("0.0.0.0:{}", config.port).parse().unwrap();
-    let peers: Vec<SocketAddr> = config
+    let peers: Vec<String> = config
         .peers
         .into_iter()
-        .map(|peer| {
-            format!("{}:{}", peer.ip, peer.port)
-                .parse()
-                .expect("failed to parse socket address")
-        })
+        .map(|peer| format!("{}:{}", peer.ip, peer.port))
         .collect();
 
     let (network_tx, network_rx) = unbounded_channel();
@@ -133,11 +129,11 @@ async fn run(opts: RunOpts) {
     direct_net.run().await;
 }
 
-async fn keep_connection(peers: Vec<SocketAddr>, net_event_sender: mpsc::Sender<NetEvent>) {
+async fn keep_connection(peers: Vec<String>, net_event_sender: mpsc::Sender<NetEvent>) {
     let mut recheck_interval = interval(Duration::from_secs(15));
     loop {
-        for &addr in peers.iter() {
-            let event = NetEvent::OutboundConnection { addr };
+        for addr in peers.iter() {
+            let event = NetEvent::OutboundConnection { addr: addr.clone() };
             net_event_sender.send(event).await.unwrap();
         }
         recheck_interval.tick().await;

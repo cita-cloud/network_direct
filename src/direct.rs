@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
@@ -29,7 +28,7 @@ struct Session {
     session_id: u64,
     // None means Inbound connection
     // Some means Outbound connection
-    peer_addr: Option<SocketAddr>,
+    peer_addr: Option<String>,
     msg_sender: UnboundedSender<Vec<u8>>,
     close_signaler: oneshot::Sender<()>,
 }
@@ -37,7 +36,7 @@ struct Session {
 impl Session {
     fn new(
         session_id: u64,
-        peer_addr: Option<SocketAddr>,
+        peer_addr: Option<String>,
         conn: TcpStream,
         net_event_sender: Sender<NetEvent>,
     ) -> Self {
@@ -121,7 +120,7 @@ impl Session {
 #[derive(Debug)]
 pub enum NetEvent {
     SessionOpen {
-        peer_addr: Option<SocketAddr>,
+        peer_addr: Option<String>,
         conn: TcpStream,
     },
     SessionClosed {
@@ -139,12 +138,11 @@ pub enum NetEvent {
         conn: TcpStream,
     },
     OutboundConnection {
-        addr: SocketAddr,
+        addr: String,
     },
     BroadcastMessage {
         msg: Vec<u8>,
     },
-    CloseNet,
 }
 
 #[derive(Debug)]
@@ -175,11 +173,8 @@ impl DirectNet {
 
     pub async fn run(&mut self) {
         self.listen(self.listen_addr).await.unwrap();
-        while let Some(msg) = self.net_event_receiver.recv().await {
-            match msg {
-                NetEvent::CloseNet => return,
-                event => self.handle_net_event(event),
-            }
+        while let Some(event) = self.net_event_receiver.recv().await {
+            self.handle_net_event(event);
         }
     }
 
@@ -203,31 +198,6 @@ impl DirectNet {
             }
         });
         Ok(())
-    }
-
-    pub async fn send_message(&mut self, session_id: u64, msg: &[u8]) {
-        let msg = msg.to_owned();
-        if let Err(e) = self
-            .net_event_sender
-            .send(NetEvent::SendMessage {
-                session_id,
-                data: msg,
-            })
-            .await
-        {
-            warn!("net event send error: `{}`", e);
-        }
-    }
-
-    pub async fn broadcast_message(&mut self, msg: &[u8]) {
-        let msg = msg.to_owned();
-        if let Err(e) = self
-            .net_event_sender
-            .send(NetEvent::BroadcastMessage { msg })
-            .await
-        {
-            warn!("net event send error: `{}`", e);
-        }
     }
 
     pub fn sender(&self) -> mpsc::Sender<NetEvent> {
@@ -256,14 +226,17 @@ impl DirectNet {
             }
             NetEvent::OutboundConnection { addr } => {
                 let event_sender = self.net_event_sender.clone();
-                if self
-                    .sessions
-                    .values()
-                    .find(|s| s.peer_addr.map(|paddr| paddr == addr).unwrap_or(false))
-                    .is_none()
-                {
+
+                let is_connected = self.sessions.values().any(|s| {
+                    s.peer_addr
+                        .as_ref()
+                        .map(|paddr| paddr == &addr)
+                        .unwrap_or(false)
+                });
+
+                if !is_connected {
                     tokio::spawn(async move {
-                        let conn = connect_with_retry(addr).await;
+                        let conn = connect_with_retry(&addr).await;
                         event_sender
                             .send(NetEvent::SessionOpen {
                                 peer_addr: Some(addr),
@@ -307,18 +280,22 @@ impl DirectNet {
                 info!("session `{}` close", session_id);
                 self.sessions.remove(&session_id);
             }
-            // CloseNet event would have been handled outside.
-            NetEvent::CloseNet => unreachable!(),
         }
     }
 }
 
-async fn connect_with_retry(addr: SocketAddr) -> TcpStream {
-    let mut retry_interval = interval(Duration::from_millis(500));
+async fn connect_with_retry(addr: &str) -> TcpStream {
+    let retry_secs = Duration::from_millis(500);
+    let mut retry_interval = interval(retry_secs);
     loop {
         retry_interval.tick().await;
         if let Ok(stream) = TcpStream::connect(addr).await {
             return stream;
         }
+        warn!(
+            "try to connect `{}` failed, retry in {} ms",
+            addr,
+            retry_secs.as_millis()
+        );
     }
 }
