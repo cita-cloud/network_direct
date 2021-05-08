@@ -23,7 +23,7 @@ const GIT_VERSION: &str = git_version!(
     args = ["--tags", "--always", "--dirty=-modified"],
     fallback = "unknown"
 );
-const GIT_HOMEPAGE: &str = "https://github.com/rink1969/cita_ng_network";
+const GIT_HOMEPAGE: &str = "https://github.com/cita-cloud/network_direct";
 
 /// network service
 #[derive(Clap)]
