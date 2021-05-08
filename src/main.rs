@@ -18,6 +18,7 @@ mod direct;
 use clap::Clap;
 use git_version::git_version;
 use log::{debug, info, warn};
+use std::net::ToSocketAddrs;
 
 const GIT_VERSION: &str = git_version!(
     args = ["--tags", "--always", "--dirty=-modified"],
@@ -111,8 +112,10 @@ async fn run(opts: RunOpts) {
         .into_iter()
         .map(|peer| {
             format!("{}:{}", peer.ip, peer.port)
-                .parse()
+                .to_socket_addrs()
                 .expect("failed to parse socket address")
+                .next()
+                .unwrap()
         })
         .collect();
 
