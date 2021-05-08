@@ -132,11 +132,11 @@ async fn run(opts: RunOpts) {
 async fn keep_connection(peers: Vec<String>, net_event_sender: mpsc::Sender<NetEvent>) {
     let mut recheck_interval = interval(Duration::from_secs(15));
     loop {
+        recheck_interval.tick().await;
         for addr in peers.iter() {
             let event = NetEvent::OutboundConnection { addr: addr.clone() };
             net_event_sender.send(event).await.unwrap();
         }
-        recheck_interval.tick().await;
     }
 }
 
