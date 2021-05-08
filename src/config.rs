@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde_derive::Deserialize;
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct NetConfig {
+    pub enable_tls: bool,
     pub port: u16,
     pub peers: Vec<PeerConfig>,
 }
@@ -39,6 +40,7 @@ mod tests {
     #[test]
     fn basic_test() {
         let toml_str = r#"
+        enable_tls = false
         port = 40000
         [[peers]]
             ip = "127.0.0.1"

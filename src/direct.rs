@@ -10,11 +10,13 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::tcp::OwnedWriteHalf;
-use tokio::stream::StreamExt;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::interval;
+
+use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::StreamExt;
 
 use futures::channel::oneshot;
 #[allow(unused)]
@@ -22,12 +24,12 @@ use log::{debug, info, warn};
 use tokio::io::Result;
 use tokio::sync::mpsc;
 
-const MAX_ADDR_LEN: usize = 128;
-
 #[derive(Debug)]
 struct Session {
     session_id: u64,
-    peer_addr: SocketAddr,
+    // None means Inbound connection
+    // Some means Outbound connection
+    peer_addr: Option<SocketAddr>,
     msg_sender: UnboundedSender<Vec<u8>>,
     close_signaler: oneshot::Sender<()>,
 }
@@ -35,13 +37,13 @@ struct Session {
 impl Session {
     fn new(
         session_id: u64,
-        peer_addr: SocketAddr,
+        peer_addr: Option<SocketAddr>,
         conn: TcpStream,
         net_event_sender: Sender<NetEvent>,
     ) -> Self {
         let (msg_sender, msg_receiver) = mpsc::unbounded_channel();
         let (tcp_rx, tcp_tx) = conn.into_split();
-        let inflow = Self::serve_inflow(session_id, tcp_rx, net_event_sender);
+        let inflow = Self::serve_inflow(session_id, tcp_rx, net_event_sender.clone());
         let outflow = Self::serve_outflow(tcp_tx, msg_receiver);
 
         let (close_signaler, close_waiter) = oneshot::channel::<()>();
@@ -58,6 +60,10 @@ impl Session {
                     info!("outflow end");
                 }
             };
+            net_event_sender
+                .send(NetEvent::SessionClosed { session_id })
+                .await
+                .unwrap();
         });
 
         Self {
@@ -78,23 +84,30 @@ impl Session {
         }
     }
 
-    async fn serve_inflow(
-        session_id: u64,
-        mut tcp_rx: OwnedReadHalf,
-        mut net_tx: Sender<NetEvent>,
-    ) {
-        while let Ok(len) = tcp_rx.read_u64().await {
-            let mut buf = vec![0; len as usize];
-            match tcp_rx.read_exact(&mut buf).await {
-                Ok(_) => {
-                    let event = NetEvent::MessageReceived {
-                        session_id,
-                        data: buf,
-                    };
-                    net_tx.send(event).await.unwrap();
+    async fn serve_inflow(session_id: u64, mut tcp_rx: OwnedReadHalf, net_tx: Sender<NetEvent>) {
+        loop {
+            match tcp_rx.read_u64().await {
+                Ok(len) => {
+                    let mut buf = vec![0; len as usize];
+                    match tcp_rx.read_exact(&mut buf).await {
+                        Ok(_) => {
+                            let event = NetEvent::MessageReceived {
+                                session_id,
+                                data: buf,
+                            };
+                            net_tx.send(event).await.unwrap();
+                        }
+                        Err(e) => {
+                            warn!("Session inflow read failed: `{}`", e);
+                        }
+                    }
                 }
                 Err(e) => {
-                    warn!("Session inflow read failed: `{}`", e);
+                    warn!(
+                        "read inflow prefix length failed, closing session, reason: `{}`",
+                        e
+                    );
+                    break;
                 }
             }
         }
@@ -108,8 +121,11 @@ impl Session {
 #[derive(Debug)]
 pub enum NetEvent {
     SessionOpen {
-        peer_addr: SocketAddr,
+        peer_addr: Option<SocketAddr>,
         conn: TcpStream,
+    },
+    SessionClosed {
+        session_id: u64,
     },
     MessageReceived {
         session_id: u64,
@@ -168,8 +184,8 @@ impl DirectNet {
     }
 
     pub async fn listen(&self, addr: SocketAddr) -> Result<()> {
-        let mut listener = TcpListener::bind(addr).await?;
-        let mut event_sender = self.net_event_sender.clone();
+        let mut listener = TcpListenerStream::new(TcpListener::bind(addr).await?);
+        let event_sender = self.net_event_sender.clone();
         tokio::spawn(async move {
             while let Some(conn) = listener.next().await {
                 match conn {
@@ -226,64 +242,36 @@ impl DirectNet {
 
     fn handle_net_event(&mut self, event: NetEvent) {
         match event {
-            NetEvent::InboundConnection { mut conn } => {
-                let mut event_sender = self.net_event_sender.clone();
+            NetEvent::InboundConnection { conn } => {
+                let event_sender = self.net_event_sender.clone();
                 tokio::spawn(async move {
-                    match conn.read_u64().await {
-                        Ok(len) if (len as usize) < MAX_ADDR_LEN => {
-                            let mut buf = vec![0; len as usize];
-                            match conn.read_exact(buf.as_mut_slice()).await {
-                                Ok(_) => {
-                                    let addr_str = std::str::from_utf8(buf.as_slice()).unwrap();
-                                    let peer_addr = addr_str.parse::<SocketAddr>().unwrap();
-                                    event_sender
-                                        .send(NetEvent::SessionOpen { peer_addr, conn })
-                                        .await
-                                        .unwrap();
-                                }
-                                Err(e) => warn!(
-                                    "Inbound connection read addr with len={} failed: {}",
-                                    len, e
-                                ),
-                            }
-                        }
-                        Ok(bad_len) => {
-                            warn!(
-                                "Inbound connection recv addr len `{}` which is too long.",
-                                bad_len
-                            );
-                        }
-                        Err(e) => {
-                            warn!("read peer_addr len from inbound connection failed: `{}`", e);
-                        }
-                    }
+                    event_sender
+                        .send(NetEvent::SessionOpen {
+                            peer_addr: None,
+                            conn,
+                        })
+                        .await
+                        .unwrap();
                 });
             }
             NetEvent::OutboundConnection { addr } => {
+                let event_sender = self.net_event_sender.clone();
                 if self
                     .sessions
                     .values()
-                    .find(|&sess| sess.peer_addr == addr)
+                    .find(|s| s.peer_addr.map(|paddr| paddr == addr).unwrap_or(false))
                     .is_none()
                 {
-                    let mut event_sender = self.net_event_sender.clone();
-                    let listen_addr = self.listen_addr;
                     tokio::spawn(async move {
-                        let mut conn = connect_with_retry(addr).await;
-                        let addr_bytes = listen_addr.to_string().as_bytes().to_owned();
-                        let payload =
-                            [&(addr_bytes.len() as u64).to_be_bytes(), &addr_bytes[..]].concat();
-                        conn.write_all(payload.as_slice()).await.unwrap();
+                        let conn = connect_with_retry(addr).await;
                         event_sender
                             .send(NetEvent::SessionOpen {
-                                peer_addr: addr,
+                                peer_addr: Some(addr),
                                 conn,
                             })
                             .await
                             .unwrap();
                     });
-                } else {
-                    warn!("repeated connection to: `{}`", addr);
                 }
             }
             NetEvent::MessageReceived { session_id, data } => {
@@ -297,7 +285,7 @@ impl DirectNet {
                 }
             }
             NetEvent::BroadcastMessage { msg } => {
-                for sess in self.sessions.values() {
+                for sess in self.sessions.values().filter(|s| s.peer_addr.is_some()) {
                     if let Err(e) = sess.sender().send(msg.clone()) {
                         warn!("Send msg failed: {}", e);
                     }
@@ -305,9 +293,19 @@ impl DirectNet {
             }
             NetEvent::SessionOpen { peer_addr, conn } => {
                 let session_id = self.next_session();
+
+                info!(
+                    "new session opened, peer_addr: `{:?}`, session_id: `{}`",
+                    peer_addr, session_id
+                );
+
                 let session =
                     Session::new(session_id, peer_addr, conn, self.net_event_sender.clone());
                 self.sessions.insert(session_id, session);
+            }
+            NetEvent::SessionClosed { session_id } => {
+                info!("session `{}` close", session_id);
+                self.sessions.remove(&session_id);
             }
             // CloseNet event would have been handled outside.
             NetEvent::CloseNet => unreachable!(),
@@ -318,9 +316,9 @@ impl DirectNet {
 async fn connect_with_retry(addr: SocketAddr) -> TcpStream {
     let mut retry_interval = interval(Duration::from_millis(500));
     loop {
+        retry_interval.tick().await;
         if let Ok(stream) = TcpStream::connect(addr).await {
             return stream;
         }
-        retry_interval.tick().await;
     }
 }

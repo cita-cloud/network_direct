@@ -49,6 +49,11 @@ struct RunOpts {
     /// Sets grpc port of this service.
     #[clap(short = 'p', long = "port", default_value = "50000")]
     grpc_port: String,
+    /// Sets path of network key file.
+    /// It's not used for network_direct. Leave it here for compatibility.
+    #[allow(unused)]
+    #[clap(short = 'k', long = "key_file", default_value = "network-key")]
+    key_file: String,
 }
 
 fn main() {
@@ -65,7 +70,7 @@ fn main() {
             // init log4rs
             log4rs::init_file("network-log4rs.yaml", Default::default()).unwrap();
             info!("grpc port of this service: {}", opts.grpc_port);
-            let mut rt = tokio::runtime::Runtime::new().unwrap();
+            let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(run(opts));
         }
     }
@@ -116,17 +121,19 @@ async fn run(opts: RunOpts) {
     let net_event_sender = direct_net.sender();
     let dispatch_table = Arc::new(RwLock::new(HashMap::new()));
 
+    let peer_count = peers.len() as u64;
     tokio::spawn(keep_connection(peers, net_event_sender.clone()));
     tokio::spawn(run_network(network_rx, dispatch_table.clone()));
     tokio::spawn(run_grpc_server(
         opts.grpc_port,
+        peer_count,
         net_event_sender,
         dispatch_table,
     ));
     direct_net.run().await;
 }
 
-async fn keep_connection(peers: Vec<SocketAddr>, mut net_event_sender: mpsc::Sender<NetEvent>) {
+async fn keep_connection(peers: Vec<SocketAddr>, net_event_sender: mpsc::Sender<NetEvent>) {
     let mut recheck_interval = interval(Duration::from_secs(15));
     loop {
         for &addr in peers.iter() {
@@ -138,16 +145,19 @@ async fn keep_connection(peers: Vec<SocketAddr>, mut net_event_sender: mpsc::Sen
 }
 
 struct NetworkServer {
+    peer_count: u64,
     net_event_sender: mpsc::Sender<NetEvent>,
     dispatch_table: Arc<RwLock<HashMap<String, (String, String)>>>,
 }
 
 impl NetworkServer {
     fn new(
+        peer_count: u64,
         net_event_sender: mpsc::Sender<NetEvent>,
         dispatch_table: Arc<RwLock<HashMap<String, (String, String)>>>,
     ) -> Self {
         Self {
+            peer_count,
             net_event_sender,
             dispatch_table,
         }
@@ -205,7 +215,9 @@ impl NetworkService for NetworkServer {
     ) -> Result<Response<NetworkStatusResponse>, Status> {
         debug!("register_endpoint request: {:?}", request);
 
-        let reply = NetworkStatusResponse { peer_count: 4 };
+        let reply = NetworkStatusResponse {
+            peer_count: self.peer_count,
+        };
         Ok(Response::new(reply))
     }
 
@@ -230,12 +242,13 @@ impl NetworkService for NetworkServer {
 
 async fn run_grpc_server(
     port: String,
+    peer_count: u64,
     net_event_sender: mpsc::Sender<NetEvent>,
     dispatch_table: Arc<RwLock<HashMap<String, (String, String)>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     let addr_str = format!("127.0.0.1:{}", port);
     let addr = addr_str.parse()?;
-    let network_server = NetworkServer::new(net_event_sender, dispatch_table);
+    let network_server = NetworkServer::new(peer_count, net_event_sender, dispatch_table);
 
     Server::builder()
         .add_service(NetworkServiceServer::new(network_server))
@@ -251,7 +264,10 @@ async fn dispatch_network_msg(
     port: String,
     msg: NetworkMsg,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = client_map.read().await.get(&port).cloned();
+    let mut client = {
+        let map = client_map.read().await;
+        map.get(&port).cloned()
+    };
 
     if client.is_none() {
         let dest_addr = format!("http://127.0.0.1:{}", port);
@@ -292,8 +308,10 @@ async fn run_network(
                         };
                         if let Some(port) = port {
                             if let Err(e) = dispatch_network_msg(client_map, port, msg).await {
-                                debug!("dispatch error: {:?}", e);
+                                warn!("dispatch error: {:?}", e);
                             }
+                        } else {
+                            warn!("dipatch port not found");
                         }
                     });
                 }
