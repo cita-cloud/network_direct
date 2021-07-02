@@ -23,6 +23,9 @@ use log::{debug, info, warn};
 use tokio::io::Result;
 use tokio::sync::mpsc;
 
+const LEN_MAGIC_NUMBER: u64 = 0xDEADBEEF00000000;
+const LEN_MAGIC_NUMBER_MASK: u64 = 0xFFFFFFFF00000000;
+
 #[derive(Debug)]
 struct Session {
     session_id: u64,
@@ -75,7 +78,8 @@ impl Session {
 
     async fn serve_outflow(mut tcp_tx: OwnedWriteHalf, mut net_rx: UnboundedReceiver<Vec<u8>>) {
         while let Some(data) = net_rx.recv().await {
-            let payload = [&(data.len() as u64).to_be_bytes(), &data[..]].concat();
+            let flag = data.len() as u64 | LEN_MAGIC_NUMBER;
+            let payload = [&flag.to_be_bytes(), &data[..]].concat();
             match tcp_tx.write_all(payload.as_slice()).await {
                 Ok(_) => (),
                 Err(e) => warn!("Session tcp send failed: `{}`", e),
@@ -86,19 +90,24 @@ impl Session {
     async fn serve_inflow(session_id: u64, mut tcp_rx: OwnedReadHalf, net_tx: Sender<NetEvent>) {
         loop {
             match tcp_rx.read_u64().await {
-                Ok(len) => {
-                    let mut buf = vec![0; len as usize];
-                    match tcp_rx.read_exact(&mut buf).await {
-                        Ok(_) => {
-                            let event = NetEvent::MessageReceived {
-                                session_id,
-                                data: buf,
-                            };
-                            net_tx.send(event).await.unwrap();
+                Ok(flag) => {
+                    if flag & LEN_MAGIC_NUMBER_MASK == LEN_MAGIC_NUMBER {
+                        let len = flag & (!LEN_MAGIC_NUMBER_MASK);
+                        let mut buf = vec![0; len as usize];
+                        match tcp_rx.read_exact(&mut buf).await {
+                            Ok(_) => {
+                                let event = NetEvent::MessageReceived {
+                                    session_id,
+                                    data: buf,
+                                };
+                                net_tx.send(event).await.unwrap();
+                            }
+                            Err(e) => {
+                                warn!("Session inflow read failed: `{}`", e);
+                            }
                         }
-                        Err(e) => {
-                            warn!("Session inflow read failed: `{}`", e);
-                        }
+                    } else {
+                        warn!("Invalid inflow flag: `{:x}`", flag);
                     }
                 }
                 Err(e) => {
