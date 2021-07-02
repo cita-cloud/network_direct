@@ -18,7 +18,6 @@ mod direct;
 use clap::Clap;
 use git_version::git_version;
 use log::{debug, info, warn};
-use std::net::ToSocketAddrs;
 
 const GIT_VERSION: &str = git_version!(
     args = ["--tags", "--always", "--dirty=-modified"],
