@@ -1,6 +1,6 @@
 [package]
 name = "network"
-version = "0.2.0"
+version = "6.0.0"
 authors = ["Rivtower Technologies <contact@rivtower.com>"]
 edition = "2018"
 
@@ -13,11 +13,11 @@ clap = "3.0.0-beta.2"
 git-version = "0.3"
 toml = "0.5.8"
 serde = { version = "1", features = ["derive"] }
-tonic = "0.4"
-prost = "0.7"
+tonic = "0.5"
+prost = "0.8"
 futures = "0.3"
 tokio = "1.5"
-cita_cloud_proto = { git = "https://github.com/cita-cloud/cita_cloud_proto" }
+cita_cloud_proto = { git = "https://github.com/cita-cloud/cita_cloud_proto", branch = "v6.0.0" }
 tokio-stream = { version = "0.1.5", features = ["net"] }
 
 [profile.release.package."*"]
