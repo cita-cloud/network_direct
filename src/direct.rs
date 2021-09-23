@@ -132,7 +132,7 @@ pub enum NetEvent {
     },
     SendMessage {
         session_id: u64,
-        data: Vec<u8>,
+        msg: Vec<u8>,
     },
     InboundConnection {
         conn: TcpStream,
@@ -250,10 +250,17 @@ impl DirectNet {
             NetEvent::MessageReceived { session_id, data } => {
                 self.outbound_sender.send((session_id, data)).unwrap();
             }
-            NetEvent::SendMessage { session_id, data } => {
+            NetEvent::SendMessage { session_id, msg } => {
                 if let Some(ref sess) = self.sessions.get(&session_id) {
-                    if let Err(e) = sess.sender().send(data) {
+                    if let Err(e) = sess.sender().send(msg) {
                         warn!("Send msg failed: {}", e);
+                    }
+                } else {
+                    warn!("session_id: `{}` no found, fall back to boardcast", session_id);
+                    for sess in self.sessions.values().filter(|s| s.peer_addr.is_some()) {
+                        if let Err(e) = sess.sender().send(msg.clone()) {
+                            warn!("Send msg failed: {}", e);
+                        }
                     }
                 }
             }
@@ -285,7 +292,7 @@ impl DirectNet {
 }
 
 async fn connect_with_retry(addr: &str) -> TcpStream {
-    let retry_secs = Duration::from_millis(500);
+    let retry_secs = Duration::from_secs(5);
     let mut retry_interval = interval(retry_secs);
     loop {
         retry_interval.tick().await;

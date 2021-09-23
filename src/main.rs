@@ -174,7 +174,7 @@ impl NetworkService for NetworkServer {
         if msg.encode(&mut buf).is_ok() {
             let event = NetEvent::SendMessage {
                 session_id: msg.origin,
-                data: buf,
+                msg: buf,
             };
             if let Err(e) = self.net_event_sender.clone().send(event).await {
                 warn!("NetworkServer send failed: `{}`", e);
